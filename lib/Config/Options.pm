@@ -1,5 +1,5 @@
 package Config::Options;
-
+our $VERSION       = 0.08;
 # Copyright (c) 2007 Edward Allen III. All rights reserved.
 #
 ## This program is free software; you can redistribute it and/or
@@ -11,7 +11,7 @@ package Config::Options;
 
 =head1 NAME
 
-Config::Options - Module to provide a configuration hash with option to read from file.
+Config::Options - module to provide a configuration hash with option to read from file.
 
 =head1 SYNOPSIS
 
@@ -27,7 +27,7 @@ Config::Options - Module to provide a configuration hash with option to read fro
 
 	# Merge options from file
 
-	$options->{optionfile} = $ENV{HOME} . "/.myoptions.conf";
+	$options->options("optionfile", $ENV{HOME} . "/.myoptions.conf");
 	$options->fromfile_perl();
 
 
@@ -45,15 +45,14 @@ pretty simple and used mainly by other modules I have written.
 use strict;
 use Data::Dumper;
 use Carp;
-
-our $VERSION       = 0.03;
-our %OPTFILE_CACHE = ();
+use Scalar::Util;
+use Config;
 
 =pod
 
-=over 4
-
 =head1 METHODS
+
+=over 4
 
 =item new()
 
@@ -65,6 +64,17 @@ is copied, not blessed.
 =cut
 
 sub new {
+	my $class = shift;
+	if ($Config{useithreads}) {
+		require Config::Options::Threaded;
+		return Config::Options::Threaded->new(@_);
+	}
+	else {
+		return $class->_new(@_);
+	}
+}
+
+sub _new {
     my $class = shift;
     my $self  = {};
     bless $self, $class;
@@ -107,12 +117,14 @@ sub options {
     elsif ($option) {
         my $value = shift;
         if ( defined $value ) {
+			$self->_setoption($option, $value);
             $self->{$option} = $value;
         }
         return $self->{$option};
     }
     return $self;
 }
+
 
 =item merge()
 
@@ -128,10 +140,136 @@ sub merge {
     my $option = shift;
     return unless ( ref $option );
     while ( my ( $k, $v ) = each %{$option} ) {
-        $self->{$k} = $v;
+		$self->_setoption($k, $v);
     }
     return $self;
 }
+
+# Safely set an option
+sub _setoption {
+	my $self = shift;
+	my ($key, $value) = @_;
+	my $new = $value;
+	if (ref $value) {
+		$new = $self->_copyref($value);
+	}
+	$self->{$key} = $new;
+	return $value;
+}
+
+sub _newhash {
+	return {};
+}
+
+sub _newarray {
+	return [];
+}
+
+
+# Created a shared copy of a (potentially unshared) reference
+sub _copyref {
+	my $self = shift;
+	my $in = shift;
+	my $haveseen = shift || [];
+	my $depth = shift || 0;
+	if (++$depth > 20) {
+	   carp "More than 20 deep on nested reference.  Is this a loop?";
+	   return $in;
+	}
+	my $seen = [ @{$haveseen} ];
+	foreach (@{$seen}) { if(Scalar::Util::refaddr($in) == $_) { carp "Attempt to create circular reference!"; return $in } }
+	push @{$seen}, Scalar::Util::refaddr($in);
+	if (Scalar::Util::reftype($in) eq "HASH") {
+		my $out = $self->_newhash();
+		while (my ($k, $v) = each %{$in}) {
+			if (ref $v) {
+				$out->{$k} = $self->_copyref($v, $seen, $depth);
+			}
+			else {
+				$out->{$k} = $v;
+			}
+		}
+		return $out;
+	}
+	elsif (Scalar::Util::reftype($in) eq "ARRAY") {
+		my $out = $self->_newarray();
+		foreach my $v (@{$in}) {
+			if (ref $v) {
+				push @{$out}, $self->_copyref($v, $seen, $depth);
+			}
+			else {
+				push @{$out}, $v;
+			}
+		}
+		return $out;
+	}
+	elsif (ref $in) {
+		croak "Attempt to copy unsupported reference type: " . (ref $in);
+	}
+	else {
+		return $in;
+	}
+}
+
+# If $from and $to are both refs of same type, merge.  Otherwise $to replaces $from.
+#
+sub _mergerefs {
+	my $self = shift;
+	my $from = shift;
+	my $to = shift;
+	my $haveseen = shift || [];
+	my $depth = shift || 0;
+	if (++$depth > 20) {
+	   carp "More than 20 deep on nested reference.  Is this a loop?";
+	   return $to;
+	}
+	if (Scalar::Util::refaddr($from) == Scalar::Util::refaddr($to)) {
+	   croak "Do NOT try to merge two identical references!"
+	}
+	my $seen = [ @{$haveseen} ];
+	foreach (@{$seen}) { if(Scalar::Util::refaddr($from) == $_) { carp "Attempt to create circular reference!"; return $to } }
+	push @{$seen}, Scalar::Util::refaddr($from), Scalar::Util::refaddr($to);
+	return unless ((ref $from) && (ref $to));
+	if (Scalar::Util::reftype($from) eq Scalar::Util::reftype($to)) {
+		if (Scalar::Util::reftype($from) eq "HASH") {
+			while (my ($k, $v) = each %{$from} ) {
+				if (exists $to->{$k}) {
+					if (defined $v) {
+						if (ref $v) {
+							$self->_mergerefs($from->{$k}, $to->{$k}, $seen, $depth)
+						}
+						else {
+							$to->{$k} = $v;
+						}
+					}
+				}
+				else {
+					if (ref $v) {
+						$to->{$k} = $self->_copyref($v, $seen, $depth);
+					}
+					else {
+						$to->{$k} = $v;
+					}
+				}
+			}
+		}
+		elsif (Scalar::Util::reftype($from) eq "ARRAY") {
+			foreach my $v (@{$from}) {
+				if (ref $v) {
+					push @{$to}, $self->_copyref($v, $seen, $depth);
+				}
+				else {
+					push @{$to}, $v;
+				}
+			}
+		}
+	}
+	else {
+		$to = $self->_copyref($from, $seen, $depth);
+	}
+	return $to;
+}
+
 
 =item deepmerge()
 
@@ -151,32 +289,7 @@ The above outputs:
 sub deepmerge {
     my $self   = shift;
     my $option = shift;
-    my @seen   = ( $self, $option );
-    return unless ( ref $option );
-    while ( my ( $k, $v ) = each %{$option} ) {
-        if ( exists $self->{$k} ) {
-            if ( ref $v ) {
-                foreach (@seen) { next if $v eq $_ }
-                push @seen, $v;
-
-                if ( ref $v eq "ARRAY" ) {
-                    push @{ $self->{$k} }, @{$v};
-                }
-                elsif ( ( ref $v eq "HASH" ) or ( ref $v eq ( ref $self ) ) ) {
-                    while ( my ( $vk, $vv ) = each %{$v} ) {
-                        $self->{$k}->{$vk} = $vv;
-                    }
-                }
-                else {
-                    $self->{$k} = $v;
-                }
-            }
-        }
-        else {
-            $self->{$k} = $v;
-        }
-    }
-    return $self;
+	$self->_mergerefs($option, $self);
 }
 
 =pod
@@ -230,19 +343,16 @@ Please note that values for this are cached.
 sub fromfile_perl {
     my $self     = shift;
     my $filename = shift || $self->options("optionfile");
-    my $files    = [];
+    my @files    = ();
     if ( ref $filename eq "ARRAY" ) {
-        $files = $filename;
+        push @files, @{$filename};
     }
     else {
-        $files = [$filename];
+	    push @files, $filename;
     }
     my $n = 0;
-    foreach my $f ( @{$files} ) {
-        if ( exists $OPTFILE_CACHE{$f} ) {
-            $self->deepmerge( $OPTFILE_CACHE{$f} );
-        }
-        elsif ( -e $f ) {
+    foreach my $f ( @files ) {
+        if ( -e $f ) {
             if ( ( exists $self->{verbose} ) && ( $self->{verbose} ) ) {
                 print STDERR "Loading options from $f\n";
             }
@@ -254,11 +364,7 @@ sub fromfile_perl {
             }
             close(IN);
             my $o = $self->deserialize( $sub, "Options File: $f" );
-            if ($o) {
-                $n++;
-                $OPTFILE_CACHE{$f} = $o;
-                $self->deepmerge($o);
-            }
+	    $o && $n++;
         }
     }
     return $n;
@@ -281,7 +387,7 @@ sub deserialize {
     my $o      = eval $data;
     if ($@) { croak "Can't process ${source}: $@" }
     else {
-        $self->merge($o);
+        $self->deepmerge($o);
         return $self;
     }
 }
@@ -302,6 +408,12 @@ sub serialize {
     return $d->Purity(1)->Terse(1)->Deepcopy(1)->Dump;
 }
 
+=item del($key)
+
+Removes $key from options.
+
+=cut
+
 sub DESTROY {
 }
 
@@ -311,27 +423,30 @@ sub DESTROY {
 
 =over 4
 
-=item Deepmerge does not handle nested references well, but it tries.
+=item Deepmerge does a poor job at recogniaing recursive loops.
 
-For example, $options->deepmerge($options) is a mess.
+For example, $options->deepmerge($options) will really screw things up.  As protection, will only loop 20 deep.
 
 =item fromfile_perl provides tainted data. 
 
 Since it comes from an external file, the data is considered tainted.
 
-=back 4
+=back 
 
 =head1 SEE ALSO
 
 L<Config::General>
 
-=head1 COPYRIGHT
-
-Copyright (c) 2007 Edward Allen III. All rights reserved.
+=head1 LICENSE
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the Artistic License, distributed
 with Perl.
+
+=head1 COPYRIGHT
+
+Copyright (c) 2007 Edward Allen III. Some rights reserved.
+
 
 
 =cut
