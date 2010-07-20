@@ -42,12 +42,11 @@ pretty simple and used mainly by other modules I have written.
 
 =cut
 
-
 use strict;
 use Data::Dumper;
 use Carp;
 
-our $VERSION = 0.02;
+our $VERSION       = 0.03;
 our %OPTFILE_CACHE = ();
 
 =pod
@@ -152,19 +151,25 @@ The above outputs:
 sub deepmerge {
     my $self   = shift;
     my $option = shift;
+    my @seen   = ( $self, $option );
     return unless ( ref $option );
     while ( my ( $k, $v ) = each %{$option} ) {
         if ( exists $self->{$k} ) {
-            if ( ref $v eq "ARRAY" ) {
-                push @{ $self->{$k} }, @{$v};
-            }
-            elsif ( ( ref $v eq "HASH" ) or ( ref $v eq ( ref $self ) ) ) {
-                while ( my ( $vk, $vv ) = each %{$v} ) {
-                    $self->{$k}->{$vk} = $vv;
+            if ( ref $v ) {
+                foreach (@seen) { next if $v eq $_ }
+                push @seen, $v;
+
+                if ( ref $v eq "ARRAY" ) {
+                    push @{ $self->{$k} }, @{$v};
                 }
-            }
-            else {
-                $self->{$k} = $v;
+                elsif ( ( ref $v eq "HASH" ) or ( ref $v eq ( ref $self ) ) ) {
+                    while ( my ( $vk, $vv ) = each %{$v} ) {
+                        $self->{$k}->{$vk} = $vv;
+                    }
+                }
+                else {
+                    $self->{$k} = $v;
+                }
             }
         }
         else {
@@ -188,21 +193,21 @@ If 'optionfile' is an array, then uses LAST option in array as default.
 =cut
 
 sub tofile_perl {
-    my $self     = shift;
+    my $self = shift;
     my $filename = shift || $self->options("optionfile");
-	my $file;
+    my $file;
     if ( ref $filename ) {
         $file = $filename->[-1];
     }
-	else {
-		$file = $filename;
-	}
-	local *OUT;
-	open (OUT, ">", $file) or croak "Can't open option file: $file for write: $!";
-	my $data = $self->serialize();
-	print OUT $data;
-	close (OUT) or croak "Error closing file: ${file}: $!";
-	return $self;
+    else {
+        $file = $filename;
+    }
+    local *OUT;
+    open( OUT, ">", $file ) or croak "Can't open option file: $file for write: $!";
+    my $data = $self->serialize();
+    print OUT $data;
+    close(OUT) or croak "Error closing file: ${file}: $!";
+    return $self;
 }
 
 =pod
@@ -232,15 +237,15 @@ sub fromfile_perl {
     else {
         $files = [$filename];
     }
-	my $n = 0;
+    my $n = 0;
     foreach my $f ( @{$files} ) {
         if ( exists $OPTFILE_CACHE{$f} ) {
             $self->deepmerge( $OPTFILE_CACHE{$f} );
         }
         elsif ( -e $f ) {
-			if ((exists $self->{verbose}) && ($self->{verbose})) {
-				print STDERR "Loading options from $f\n";
-			}
+            if ( ( exists $self->{verbose} ) && ( $self->{verbose} ) ) {
+                print STDERR "Loading options from $f\n";
+            }
             local *IN;
             my $sub = "";
             open( IN, $f ) or croak "Couldn't open option file $f: $!";
@@ -248,14 +253,15 @@ sub fromfile_perl {
                 $sub .= $_;
             }
             close(IN);
-            my $o = $self->deserialize($sub, "Options File: $f");
-			if ($o) {
-				$n++;
-				$OPTFILE_CACHE{$f} = $o;
-			}
+            my $o = $self->deserialize( $sub, "Options File: $f" );
+            if ($o) {
+                $n++;
+                $OPTFILE_CACHE{$f} = $o;
+                $self->deepmerge($o);
+            }
         }
     }
-	return $n;
+    return $n;
 }
 
 =pod
@@ -269,15 +275,15 @@ Takes a scalar as argument and evals it, then merges option.  If second option i
 =cut
 
 sub deserialize {
-	my $self = shift;
-	my $data = shift;
-	my $source = shift || "Scalar";
-	my $o = eval $data;
-	if ($@) { croak "Can't process ${source}: $@" }
-	else {
-		$self->merge($o);
-		return $self;
-	}
+    my $self   = shift;
+    my $data   = shift;
+    my $source = shift || "Scalar";
+    my $o      = eval $data;
+    if ($@) { croak "Can't process ${source}: $@" }
+    else {
+        $self->merge($o);
+        return $self;
+    }
 }
 
 =pod
@@ -291,9 +297,9 @@ Output optons hash as a scalar using Data::Dumper.
 =cut
 
 sub serialize {
-	my $self = shift;
-	my $d = Data::Dumper->new([{ %{$self} }]);
-	return $d->Purity(1)->Terse(1)->Deepcopy(1)->Dump;
+    my $self = shift;
+    my $d = Data::Dumper->new( [ { %{$self} } ] );
+    return $d->Purity(1)->Terse(1)->Deepcopy(1)->Dump;
 }
 
 sub DESTROY {
@@ -305,7 +311,7 @@ sub DESTROY {
 
 =over 4
 
-=item Deepmerge does not handle nested references.
+=item Deepmerge does not handle nested references well, but it tries.
 
 For example, $options->deepmerge($options) is a mess.
 
